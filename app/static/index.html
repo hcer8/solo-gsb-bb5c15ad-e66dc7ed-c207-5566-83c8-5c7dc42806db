@@ -286,6 +286,62 @@ A001, 2026-09-18 08:25:00, 中心公园, 出"></textarea>
       </div>
     </section>
 
+    <!-- 行程耗时异常审计 -->
+    <section class="card" id="sec-duration-audit">
+      <h2>9. 行程耗时异常审计</h2>
+      <p class="hint">对<strong>已保存</strong>且可完整配对的刷卡记录，按<strong>有向站点对</strong>
+        （进站站点 → 出站站点）分组统计行程耗时（出站 − 进站）。仅审计至少
+        <strong>6</strong> 程的站点对：每条行程的基线<strong>排除自身</strong>，以其余样本的
+        中位数与 MAD 计算阈值 <code>max(10 分钟, 3 × 1.4826 × MAD)</code>，
+        绝对偏差<strong>严格大于</strong>阈值时标记为「过长」或「过短」。
+        样本不足的站点对单列展示；未知站点与票价缺项不阻断审计，
+        配对 / 时间类错误按原有定位错误返回。审计<strong>全程只读</strong>：
+        不改记录、配置或账单。</p>
+      <div class="row-actions">
+        <button class="btn btn-primary" id="btn-duration-audit" type="button">⏱ 运行耗时审计</button>
+        <span id="duration-status" class="status"></span>
+      </div>
+
+      <div id="duration-errors" class="errors-panel" hidden>
+        <h3>❌ 无法执行耗时审计 —— 存在配对 / 时间类错误，请先修复（记录、配置与账单均未改动）</h3>
+        <ul id="duration-errors-list"></ul>
+      </div>
+
+      <div id="duration-result" class="audit-result" hidden>
+        <div id="duration-summary" class="audit-summary"></div>
+
+        <div id="duration-anomalies-block" hidden>
+          <h3>耗时异常行程</h3>
+          <div class="table-wrap">
+            <table id="duration-anomalies-table">
+              <thead>
+                <tr>
+                  <th>卡号</th><th>#</th><th>站点对</th>
+                  <th>进站时刻</th><th>出站时刻</th>
+                  <th>耗时(分钟)</th><th>标记</th>
+                  <th>基线样本数</th><th>基线中位数(分钟)</th><th>MAD(分钟)</th>
+                  <th>阈值(分钟)</th><th>偏差(分钟)</th><th>原始行号(进/出)</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div id="duration-insufficient-block" hidden>
+          <h3>样本不足的站点对（&lt; 6 程，不参与审计）</h3>
+          <div class="table-wrap">
+            <table id="duration-insufficient-table">
+              <thead>
+                <tr><th>站点对</th><th>样本数</th><th>所需最少</th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <footer class="footer">
       FastAPI + SQLite + 原生前端 · 数据保存在容器 /data 卷 ·
       <a href="/docs" target="_blank">API 文档</a>

@@ -164,8 +164,8 @@ td.wrap { white-space: normal; min-width: 240px; }
   margin-top: 12px;
 }
 .errors-panel h3 { color: var(--danger-text); margin-top: 0; }
-#errors-list, #repair-errors-list { margin: 0; padding-left: 20px; }
-#errors-list li, #repair-errors-list li {
+#errors-list, #repair-errors-list, #duration-errors-list { margin: 0; padding-left: 20px; }
+#errors-list li, #repair-errors-list li, #duration-errors-list li {
   margin-bottom: 8px;
   color: var(--danger-text);
   font-size: 13px;
@@ -295,6 +295,8 @@ td.wrap { white-space: normal; min-width: 240px; }
 .change-list .sub { color: var(--muted); font-size: 12px; }
 .tag-del { background: var(--danger-text); }
 .tag-flip { background: #b7791f; }
+.tag-toolong { background: var(--danger-text); }
+.tag-tooshort { background: #b7791f; }
 
 .fixed-text {
   background: #f6f8fb;
