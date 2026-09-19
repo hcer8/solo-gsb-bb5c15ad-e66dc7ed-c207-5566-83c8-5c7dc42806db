@@ -689,6 +689,127 @@ function copyAllSuggests() {
     `已复制 ${lastSuggestLines.length} 行建议补录行（可粘贴到「4. 票价矩阵」，核对后保存）`);
 }
 
+/* ---------------- 9. 行程耗时异常审计（只读） ---------------- */
+
+function renderDurationErrors(errors) {
+  const ul = $("duration-errors-list");
+  ul.innerHTML = "";
+  for (const e of errors) ul.appendChild(renderErrorLi(e));
+  $("duration-errors").hidden = false;
+  $("duration-result").hidden = true;
+}
+
+function fmtMin(v) {
+  return Number(v).toFixed(2);
+}
+
+function renderDurationAudit(data) {
+  $("duration-errors").hidden = true;
+  $("duration-result").hidden = false;
+
+  const anomalies = data.anomalies || [];
+  const insufficient = data.insufficient || [];
+  const longCount = anomalies.filter((a) => a.kind === "long").length;
+  const shortCount = anomalies.length - longCount;
+
+  const insNote = insufficient.length
+    ? `另有 <strong>${insufficient.length}</strong> 个站点对样本不足` +
+      `（&lt; ${data.min_samples} 程），未参与判定。`
+    : "";
+  const summary = $("duration-summary");
+  if (!anomalies.length) {
+    summary.innerHTML =
+      `✅ 共统计 <strong>${data.trip_count}</strong> 笔行程 / ` +
+      `<strong>${data.pair_count}</strong> 个有向站点对，其中 ` +
+      `<strong>${data.audited_pairs}</strong> 个站点对样本数达标` +
+      `（≥ ${data.min_samples} 程）：未发现耗时异常。${insNote}<br>` +
+      `<span class="sub">审计全程只读：未修改记录、配置或账单。</span>`;
+  } else {
+    summary.innerHTML =
+      `共统计 <strong>${data.trip_count}</strong> 笔行程 / ` +
+      `<strong>${data.pair_count}</strong> 个有向站点对，其中 ` +
+      `<strong>${data.audited_pairs}</strong> 个站点对样本数达标` +
+      `（≥ ${data.min_samples} 程）：发现耗时异常 ` +
+      `<strong>${anomalies.length}</strong> 笔` +
+      `（过长 ${longCount} 笔 / 过短 ${shortCount} 笔）。${insNote}<br>` +
+      `<span class="sub">阈值 = max(10 分钟, 3 × 1.4826 × MAD)，` +
+      `基线已排除行程自身；审计全程只读：未修改记录、配置或账单。</span>`;
+  }
+
+  // 耗时异常行程
+  const aBlock = $("duration-anomalies-block");
+  aBlock.hidden = anomalies.length === 0;
+  const atb = $("duration-anomalies-table").querySelector("tbody");
+  atb.innerHTML = "";
+  for (const a of anomalies) {
+    const isLong = a.kind === "long";
+    const devText = (a.deviation_min > 0 ? "+" : "") + fmtMin(a.deviation_min);
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><span class="tag ${isLong ? "tag-long" : "tag-short"}">${isLong ? "过长" : "过短"}</span></td>
+      <td>${escapeHtml(a.card)}</td>
+      <td class="num">${a.seq}</td>
+      <td>${escapeHtml(a.entry_station)} → ${escapeHtml(a.exit_station)}</td>
+      <td>${a.entry_time}</td>
+      <td>${a.exit_time}</td>
+      <td class="num">${fmtMin(a.duration_min)}</td>
+      <td class="num">${a.baseline_count}</td>
+      <td class="num">${fmtMin(a.median_min)}</td>
+      <td class="num">${fmtMin(a.mad_min)}</td>
+      <td class="num">${fmtMin(a.threshold_min)}</td>
+      <td class="num ${isLong ? "delta-up" : "delta-down"}">${devText}</td>
+      <td class="num">进 ${a.entry_line} / 出 ${a.exit_line}</td>`;
+    atb.appendChild(tr);
+  }
+
+  // 样本不足的站点对
+  const iBlock = $("duration-insufficient-block");
+  iBlock.hidden = insufficient.length === 0;
+  const itb = $("duration-insufficient-table").querySelector("tbody");
+  itb.innerHTML = "";
+  for (const p of insufficient) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${escapeHtml(p.entry_station)} → ${escapeHtml(p.exit_station)}</td>
+      <td class="num">${p.trip_count}</td>
+      <td>需 ≥ ${p.required} 程才参与判定，当前 ${p.trip_count} 程</td>`;
+    itb.appendChild(tr);
+  }
+}
+
+async function runDurationAudit() {
+  const status = $("duration-status");
+  status.textContent = "审计中…";
+  status.className = "status";
+  $("duration-errors").hidden = true;
+  $("duration-result").hidden = true;
+  try {
+    const data = await api("/api/duration-audit", { method: "POST" });
+    renderDurationAudit(data);
+    if (!data.anomaly_count) {
+      status.textContent =
+        `审计完成：${data.audited_pairs} 个达标站点对均无耗时异常（只读，未改动数据）`;
+    } else {
+      status.textContent =
+        `审计完成：标记 ${data.anomaly_count} 笔耗时异常` +
+        "（只读，记录 / 配置 / 账单均未改动）";
+    }
+    status.className = "status ok";
+    toast("耗时审计完成（只读，未保存任何改动）");
+  } catch (e) {
+    const errors = (e.payload && e.payload.errors) || [];
+    if (errors.length) {
+      renderDurationErrors(errors);
+      status.textContent =
+        `存在 ${errors.length} 个配对 / 时间类错误，未生成审计结果（数据均未改动）`;
+    } else {
+      status.textContent = summaryError(e, "耗时审计请求失败");
+    }
+    status.className = "status bad";
+    toast("无法执行耗时审计", false);
+  }
+}
+
 /* ---------------- 演示数据 ---------------- */
 
 const DEMO = {
@@ -782,6 +903,7 @@ function bind() {
   $("btn-gen-fares").addEventListener("click", genFareTemplate);
   $("btn-repair").addEventListener("click", runRepairPreview);
   $("btn-fare-audit").addEventListener("click", runFareAudit);
+  $("btn-duration-audit").addEventListener("click", runDurationAudit);
   $("btn-copy-suggests").addEventListener("click", copyAllSuggests);
   $("btn-verify").addEventListener("click", runVerify);
   $("btn-verify-top").addEventListener("click", runVerify);

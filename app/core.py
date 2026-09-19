@@ -1097,3 +1097,142 @@ def fare_path_audit(stations: list[Station],
         missing=missing,
         overpriced=overpriced,
     )
+
+
+# ---------------------------------------------------------------------------
+# 行程耗时异常审计（只读：不改记录、配置或账单）
+# ---------------------------------------------------------------------------
+
+# 有向站点对参与判定的最小样本数（行程数），不足的站点对单独列出
+DURATION_MIN_SAMPLES = 6
+# 阈值下限（分钟）：即使 MAD 为 0，也至少允许 10 分钟的波动
+DURATION_FLOOR_MINUTES = 10.0
+# 阈值 = max(下限, DURATION_MAD_K × MAD_SCALE × MAD)
+DURATION_MAD_K = 3.0
+MAD_SCALE = 1.4826  # 正态分布一致性常数
+
+KIND_LONG = "long"    # 耗时过长（高于基线中位数）
+KIND_SHORT = "short"  # 耗时过短（低于基线中位数）
+
+# 阻断审计的错误类型（配对 / 时间类）；未知站点、票价缺项、参数类不阻断
+_DURATION_BLOCKING_CODES = {
+    "MISSING_ENTRY", "MISSING_EXIT", "TIME_REVERSED", "DUPLICATE_SWIPE",
+}
+
+
+@dataclass
+class DurationAudit:
+    """行程耗时异常审计结果。
+
+    ok=False 时 errors 为 verify() 的原有定位错误（仅配对 / 时间类错误
+    阻断审计；未知站点、票价缺项不阻断）。
+    ok=True 时 anomalies 为被标记的行程（含基线样本数、中位数、MAD、
+    阈值、偏差与原始进出行号），insufficient 为样本不足
+    （< DURATION_MIN_SAMPLES 程）而未参与判定的有向站点对。
+    """
+    ok: bool
+    trip_count: int = 0
+    pair_count: int = 0
+    audited_pairs: int = 0
+    min_samples: int = DURATION_MIN_SAMPLES
+    anomalies: list[dict] = field(default_factory=list)
+    insufficient: list[dict] = field(default_factory=list)
+    errors: list[dict] = field(default_factory=list)
+
+
+def _median(values: list[float]) -> float:
+    """中位数；偶数个取中间两值的平均。"""
+    s = sorted(values)
+    n = len(s)
+    mid = n // 2
+    if n % 2:
+        return float(s[mid])
+    return (s[mid - 1] + s[mid]) / 2.0
+
+
+def duration_audit(stations: list[Station],
+                   fares: list[Fare],
+                   records: list[Swipe],
+                   cfg: Config) -> DurationAudit:
+    """行程耗时异常审计（全程只读：不改记录、配置或账单）。
+
+    对已保存且可完整配对的刷卡记录，按（进站站点 -> 出站站点）的有向
+    站点对分组，行程耗时 = 出站时刻 - 进站时刻：
+
+    - 仅样本数 >= DURATION_MIN_SAMPLES 的站点对参与判定；样本不足的
+      站点对列入 insufficient，不产生任何标记；
+    - 每条行程从基线中排除自身，以其余样本的中位数与 MAD（基线样本
+      相对中位数的绝对偏差的中位数）计算阈值
+      max(10 分钟, 3 × 1.4826 × MAD)；绝对偏差严格大于阈值时标记为
+      过长（long）或过短（short）；
+    - 判定在秒级精度上进行，展示值换算为分钟并保留两位小数；
+    - 配对 / 时间类错误（MISSING_ENTRY / MISSING_EXIT / TIME_REVERSED /
+      DUPLICATE_SWIPE）按 verify() 的原有定位错误返回，不生成审计结果；
+      未知站点与票价缺项不阻断审计（耗时与分区、票价无关）。
+    """
+    result = verify(stations, fares, records, cfg)
+    if not result.ok:
+        blocking = [e for e in result.errors
+                    if e.get("code") in _DURATION_BLOCKING_CODES]
+        if blocking:
+            # 配对 / 时间类错误：原有定位错误原样返回，不生成审计
+            return DurationAudit(ok=False, errors=result.errors)
+
+    # 有向站点对 -> 该对上的行程（卡号, 卡内序号, 进站记录, 出站记录）
+    pair_trips: dict[tuple[str, str], list[tuple[str, int, Swipe, Swipe]]] = {}
+    for card, seq, sw_in, sw_out in result.trips:
+        key = (sw_in.station, sw_out.station)
+        pair_trips.setdefault(key, []).append((card, seq, sw_in, sw_out))
+
+    anomalies: list[dict] = []
+    insufficient: list[dict] = []
+    audited = 0
+    for pair in sorted(pair_trips):
+        trips = sorted(pair_trips[pair], key=lambda t: (t[0], t[1]))
+        n = len(trips)
+        if n < DURATION_MIN_SAMPLES:
+            insufficient.append({
+                "entry_station": pair[0],
+                "exit_station": pair[1],
+                "trip_count": n,
+                "required": DURATION_MIN_SAMPLES,
+            })
+            continue
+        audited += 1
+        # 秒级耗时（出站 - 进站）；verify 已保证同卡时间有序，耗时非负
+        durations = [(t[3].t - t[2].t).total_seconds() for t in trips]
+        for idx, (card, seq, sw_in, sw_out) in enumerate(trips):
+            baseline = durations[:idx] + durations[idx + 1:]
+            median_s = _median(baseline)
+            mad_s = _median([abs(x - median_s) for x in baseline])
+            threshold_s = max(DURATION_FLOOR_MINUTES * 60.0,
+                              DURATION_MAD_K * MAD_SCALE * mad_s)
+            dev_s = durations[idx] - median_s
+            if abs(dev_s) <= threshold_s:
+                continue  # 严格大于阈值才标记
+            anomalies.append({
+                "kind": KIND_LONG if dev_s > 0 else KIND_SHORT,
+                "card": card,
+                "seq": seq,
+                "entry_station": sw_in.station,
+                "exit_station": sw_out.station,
+                "entry_time": sw_in.time_text,
+                "exit_time": sw_out.time_text,
+                "duration_min": _round2(durations[idx] / 60.0),
+                "baseline_count": len(baseline),
+                "median_min": _round2(median_s / 60.0),
+                "mad_min": _round2(mad_s / 60.0),
+                "threshold_min": _round2(threshold_s / 60.0),
+                "deviation_min": _round2(dev_s / 60.0),
+                "entry_line": sw_in.line,
+                "exit_line": sw_out.line,
+            })
+
+    return DurationAudit(
+        ok=True,
+        trip_count=len(result.trips),
+        pair_count=len(pair_trips),
+        audited_pairs=audited,
+        anomalies=anomalies,
+        insufficient=insufficient,
+    )

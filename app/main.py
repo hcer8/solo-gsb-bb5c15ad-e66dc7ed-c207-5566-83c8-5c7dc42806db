@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from . import db
 from .core import (
     Config,
+    duration_audit,
     fare_path_audit,
     parse_fares_text,
     parse_records_text,
@@ -37,7 +38,7 @@ app = FastAPI(
     title="公交刷卡票价核验台",
     description="录入站点分区、票价矩阵、换乘抵扣、每日封顶与刷卡记录，"
                 "按卡号配对进出站并核验计价。",
-    version="1.2.0",
+    version="1.3.0",
     lifespan=lifespan,
 )
 
@@ -300,6 +301,45 @@ def run_fare_path_audit():
         "pair_count": result.pair_count,
         "missing": result.missing,
         "overpriced": result.overpriced,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 行程耗时异常审计（只读：不改记录、配置或账单）
+# ---------------------------------------------------------------------------
+
+@app.post("/api/duration-audit")
+def run_duration_audit():
+    """对已保存刷卡记录做行程耗时异常审计。
+
+    - 按（进站站点 -> 出站站点）的有向站点对分组，耗时 = 出站时刻 - 进站时刻；
+      仅样本数 >= 6 的站点对参与判定，样本不足的站点对单独列出；
+    - 每条行程从基线中排除自身，以其余样本的中位数与 MAD 计算阈值
+      max(10 分钟, 3 × 1.4826 × MAD)，绝对偏差严格大于阈值时标记为
+      过长 / 过短，并给出基线样本数、中位数、MAD、阈值、偏差与原始进出行号；
+    - 配对 / 时间类错误（缺失进出站、时间逆序、重复刷卡）返回 422 与
+      verify() 的原有定位错误；未知站点与票价缺项不阻断审计；
+    - 全程只读：不修改记录、配置，也不写入或清空账单。
+    """
+    with db.connect() as conn:
+        cfg = db.get_config(conn)
+        stations, fares, records = db.load_domain(conn)
+        result = duration_audit(stations, fares, records, cfg)
+
+    if not result.ok:
+        return JSONResponse(
+            status_code=422,
+            content={"ok": False, "errors": result.errors})
+
+    return {
+        "ok": True,
+        "trip_count": result.trip_count,
+        "pair_count": result.pair_count,
+        "audited_pairs": result.audited_pairs,
+        "min_samples": result.min_samples,
+        "anomaly_count": len(result.anomalies),
+        "anomalies": result.anomalies,
+        "insufficient": result.insufficient,
     }
 
 
